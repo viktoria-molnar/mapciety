@@ -1,7 +1,7 @@
 """
 Town or Cow - step 1: get the data.
 
-Downloads four things for Switzerland and Hungary into data/raw/ :
+Downloads five things for Switzerland and Hungary into data/raw/ :
 
   1. lau_2024.gpkg          boundaries of every municipality in Europe, with
                             population and area (Eurostat GISCO, "LAU" = local
@@ -14,6 +14,7 @@ Downloads four things for Switzerland and Hungary into data/raw/ :
   4. built_up_*.tif         how many square metres of each 100 m x 100 m cell
                             are covered by buildings (GHSL, from satellite images)
      built_volume_*.tif     how many cubic metres of building stand on each cell
+  5. osm_industrial_*.json  outlines of industrial areas (OpenStreetMap)
 
 Then it prints a short report, so we can see what we actually got before we
 build anything on top of it.
@@ -26,8 +27,10 @@ Files that already exist are not downloaded again. Delete a file in data/raw/
 if you want a fresh copy.
 """
 
+import json
 import shutil
 import sqlite3
+import time
 import zipfile
 from pathlib import Path
 
@@ -68,15 +71,42 @@ SWISS_URL = (
     "swissboundaries3d_2026-01/swissboundaries3d_2026-01_2056_5728.gpkg.zip"
 )
 
+# Industrial areas come from OpenStreetMap, through a service called Overpass.
+# The query is written in its own small language: "give me every outline
+# tagged landuse=industrial inside this rectangle, with its corner points".
+# The rectangle is a bit bigger than the country; step 2 only uses what lies
+# inside the municipalities, so the extra does no harm.
+INDUSTRIAL_QUERY = """
+[out:json][timeout:600];
+(
+  way["landuse"="industrial"]({south},{west},{north},{east});
+  relation["landuse"="industrial"]({south},{west},{north},{east});
+);
+out geom;
+"""
+COUNTRY_BOXES = {  # south, west, north, east in degrees
+    "CH": (45.80, 5.90, 47.85, 10.55),
+    "HU": (45.70, 16.05, 48.65, 22.95),
+}
+# The main server is often too busy, so we try a few in turn, several times.
+OVERPASS_URLS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://ovp.dresel.systems/api/interpreter",
+]
+OVERPASS_ROUNDS = 3
+OVERPASS_PAUSE = 30  # seconds to wait before the next round
+
 # Public services like to know who is calling them.
 HEADERS = {"User-Agent": "town-or-cow (30DayMapChallenge learning project)"}
 
 
 # --- Downloading ------------------------------------------------------------
 
-def download(url, target, timeout=600):
+def download(url, target, form=None, timeout=900):
     """Download url into the file target and return target.
 
+    form is for services that expect a question sent along (like Overpass).
     The download goes to a temporary ".part" file first, so a download that
     breaks half way never looks like a finished file.
     """
@@ -87,8 +117,14 @@ def download(url, target, timeout=600):
     target.parent.mkdir(parents=True, exist_ok=True)
     part = target.with_name(target.name + ".part")
 
-    with requests.get(url, headers=HEADERS, stream=True, timeout=timeout) as response:
-        response.raise_for_status()  # turns "404 not found" etc. into an error
+    method = "GET" if form is None else "POST"
+    with requests.request(method, url, data=form, headers=HEADERS,
+                          stream=True, timeout=timeout) as response:
+        if not response.ok:
+            # Turn "404 not found", "429 too busy" etc. into an error that
+            # includes what the server said about it.
+            said = " ".join(response.text[:300].split())
+            raise requests.HTTPError(f"{response.status_code} {response.reason}: {said}")
         megabytes = 0
         with open(part, "wb") as file:
             for chunk in response.iter_content(chunk_size=1024 * 1024):
@@ -128,6 +164,49 @@ def get_swiss_population():
         return gpkg
     zip_path = download(SWISS_URL, RAW_DIR / "swissboundaries3d_2026.gpkg.zip")
     return unzip_one(zip_path, ".gpkg", gpkg)
+
+
+def industrial_problem(path):
+    """Return what is wrong with a downloaded industrial file, or None if it is fine."""
+    try:
+        answer = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError:
+        return "the answer was not the kind of file we asked for"
+    if "remark" in answer:
+        # A server that runs out of time still answers, with a "remark" and
+        # an incomplete list.
+        return f"the server gave up ({answer['remark']})"
+    if not answer.get("elements"):
+        return "the answer was empty"
+    return None
+
+
+def get_industrial(country):
+    target = RAW_DIR / f"osm_industrial_{country}.json"
+    if target.exists() and industrial_problem(target) is not None:
+        print(f"  the existing {target.name} is no good "
+              f"({industrial_problem(target)}), downloading it again")
+        target.unlink()
+
+    south, west, north, east = COUNTRY_BOXES[country]
+    query = INDUSTRIAL_QUERY.format(south=south, west=west, north=north, east=east)
+
+    for round_number in range(1, OVERPASS_ROUNDS + 1):
+        for url in OVERPASS_URLS:
+            server = url.split("/")[2]
+            try:
+                download(url, target, form={"data": query})
+                problem = industrial_problem(target)
+            except requests.RequestException as error:
+                problem = " ".join(str(error).split())[:150]
+            if problem is None:
+                return target
+            target.unlink(missing_ok=True)
+            print(f"  {server} did not work: {problem}")
+        if round_number < OVERPASS_ROUNDS:
+            print(f"  waiting {OVERPASS_PAUSE} seconds, then trying again ...")
+            time.sleep(OVERPASS_PAUSE)
+    raise ValueError("none of the OpenStreetMap servers answered properly")
 
 
 def get_built(country, kind):
@@ -222,6 +301,14 @@ def report_swiss_population(path):
     connection.close()
 
 
+def report_industrial(path):
+    answer = json.loads(path.read_text(encoding="utf-8"))
+    kinds = [element["type"] for element in answer.get("elements", [])]
+    megabytes = path.stat().st_size / 1024 / 1024
+    print(f"\nIndustrial areas: {path.name}, {megabytes:.0f} MB, "
+          f"{kinds.count('way')} outlines, {kinds.count('relation')} relations")
+
+
 def report_built(path):
     megabytes = path.stat().st_size / 1024 / 1024
     print(f"\nBuilt-up map: {path.name}, {megabytes:.0f} MB")
@@ -241,6 +328,8 @@ def main():
                       lambda country=country: get_built(country, "S"), report_built))
         steps.append((f"Built-up volume {country} (GHSL)",
                       lambda country=country: get_built(country, "V"), report_built))
+        steps.append((f"Industrial areas {country} (OpenStreetMap)",
+                      lambda country=country: get_industrial(country), report_industrial))
 
     files = []
     problems = []

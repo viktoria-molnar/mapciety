@@ -31,6 +31,8 @@ The first version uses only information about people and buildings per municipal
 
 Footprint alone treats a ten-storey block like a bungalow. Volume and height bring in the vertical side of "urban".
 
+Factories and warehouses are large buildings that nobody lives in, and they make a place look bigger than it feels. So the last three features exist twice: once for all buildings, and once without the buildings on industrial land (columns starting with `town_`). Offices and shops stay in both, because they are part of what makes a place urban. A further feature, `industrial_share`, is the part of the building volume that stands on industrial land.
+
 ## Data
 
 | What | Source | Used for |
@@ -38,6 +40,7 @@ Footprint alone treats a ten-storey block like a bungalow. Volume and height bri
 | Municipality boundaries, population and area, 2024 edition | Eurostat GISCO, local administrative units | The map, inhabitants, density |
 | List of municipalities with degree of urbanisation, 2024 edition | Eurostat | The official urban/rural label the model learns from |
 | Built-up surface and built-up volume 2020, 100 m cells | Global Human Settlement Layer (GHSL), European Commission | Building footprint, volume and height |
+| Outlines of industrial areas, current | OpenStreetMap, via the Overpass service | Separating factories and warehouses from the rest |
 | Swiss boundary file, 2026-01 edition | swisstopo, swissBOUNDARIES3D | Newer population figures for Switzerland |
 
 One source for both countries, so the same definition of "urban" applies to both. National definitions don't compare: Hungary's legal "town" status and Switzerland's own typology measure different things.
@@ -77,6 +80,7 @@ These are part of the project and will be discussed, not hidden:
 - **Municipalities are not alike.** Hungarian plain towns often have very large territories with scattered farms, so their density looks low even when the centre is compact. A large alpine municipality can contain one dense village and a lot of empty mountain.
 - **The label is itself built from population density.** The model partly re-learns a rule, so a high score inside one country is less impressive than it looks. The swap between countries is the honest test.
 - **Built-up area comes from satellite images.** Small scattered buildings are easy to miss, and greenhouses or large farm buildings count as built-up.
+- **Industrial areas depend on volunteers.** OpenStreetMap is mapped more thoroughly in some places than others, so a missing industrial area can mean "no industry" or "nobody drew it yet". Farm buildings are not removed at all.
 - **Building height is an estimate.** It is modelled from satellite data, not measured building by building, and it includes factories and warehouses, not only homes.
 - **We count people per municipality, not per building.** The data has no number of buildings and no number of flats.
 - **The years don't line up exactly.** Labels are from 2024, buildings from 2020, and population from 2024 or later. These things change slowly, but not at the same speed everywhere.
@@ -84,14 +88,15 @@ These are part of the project and will be discussed, not hidden:
 
 ## How to run
 
-The first time, set up the project's own Python environment:
+You need Python 3.10 or newer. The Python that ships with Xcode on a Mac (3.9) is too old: the OpenStreetMap servers refuse its connections.
+
+The first time, set up the project's own Python environment. With [uv](https://docs.astral.sh/uv/):
 
 ```
 cd ~/dev/mapciety/town-or-cow
-python3 -m venv .venv
+uv venv --python 3.13 --seed
 source .venv/bin/activate
-pip3 install --upgrade pip
-pip3 install -r requirements.txt
+uv pip install -r requirements.txt
 ```
 
 In every new Terminal window, switch it on again:
@@ -108,11 +113,12 @@ python3 01_get_data.py
 python3 02_prepare.py
 ```
 
-Step 1 downloads into `data/raw/` and skips files that are already there. Step 2 writes `data/municipalities.gpkg`. The `data/` folder is not uploaded to GitHub.
+Step 1 downloads into `data/raw/` and skips files that are already there. The OpenStreetMap servers are often busy; the script tries three of them several times, and if it still fails, running it again later usually works. Step 2 writes `data/municipalities.gpkg`. The `data/` folder is not uploaded to GitHub.
 
 ## Sources
 
 - Eurostat GISCO, local administrative units 2024: https://gisco-services.ec.europa.eu/distribution/v2/lau
 - Eurostat, local administrative units and correspondence tables: https://ec.europa.eu/eurostat/web/nuts/local-administrative-units
 - swisstopo, swissBOUNDARIES3D: https://data.geo.admin.ch/api/stac/v0.9/collections/ch.swisstopo.swissboundaries3d
+- OpenStreetMap contributors, data under the Open Database License: https://www.openstreetmap.org/copyright
 - GHSL built-up surface and volume (GHS-BUILT-S and GHS-BUILT-V R2023A), European Commission Joint Research Centre, CC BY 4.0: https://human-settlement.emergency.copernicus.eu

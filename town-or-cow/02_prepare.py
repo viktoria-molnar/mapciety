@@ -5,7 +5,8 @@ Turns the raw downloads into one clean table with one row per municipality:
 
     country, name, label (city / town or suburb / rural), city region,
     population, area, density, built-up area and volume, built-up share,
-    built-up area and volume per inhabitant, average building height
+    built-up area and volume per inhabitant, average building height,
+    and the same again without buildings on industrial land
 
 and saves it as data/municipalities.gpkg. That file holds the table and the
 boundaries together, and because a GeoPackage is an SQLite database, every
@@ -16,6 +17,7 @@ Run it from the town-or-cow folder, after 01_get_data.py:
     python3 02_prepare.py
 """
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -25,6 +27,9 @@ import pandas
 import rasterio
 import rasterio.features
 import rasterio.windows
+import shapely
+import shapely.ops
+from shapely.geometry import LineString, Polygon
 
 # --- Settings ---------------------------------------------------------------
 
@@ -112,6 +117,45 @@ def read_newer_swiss_population():
     })
 
 
+def read_industrial(country):
+    """Industrial areas from OpenStreetMap as a list of shapes.
+
+    The download is a list of "elements". Most are simple outlines ("way"):
+    a list of corner points. Some are "relations": several outline pieces
+    that together form one area, sometimes with holes in it.
+    """
+    path = RAW_DIR / f"osm_industrial_{country}.json"
+    if not path.exists():
+        print(f"  {path.name} not found - run 01_get_data.py again")
+        return None
+    elements = json.loads(path.read_text(encoding="utf-8"))["elements"]
+
+    def to_line(points):
+        return LineString([(point["lon"], point["lat"]) for point in points])
+
+    def to_area(lines):
+        # Glue outline pieces together and turn every closed ring into an area.
+        if not lines:
+            return Polygon()
+        return shapely.union_all(list(shapely.ops.polygonize(shapely.union_all(lines))))
+
+    shapes = []
+    for element in elements:
+        if element["type"] == "way":
+            points = element.get("geometry", [])
+            if len(points) >= 4 and points[0] == points[-1]:
+                shapes.append(Polygon(to_line(points).coords))
+        elif element["type"] == "relation":
+            pieces = [member for member in element.get("members", [])
+                      if member["type"] == "way" and len(member.get("geometry") or []) >= 2]
+            outer = [to_line(m["geometry"]) for m in pieces if m.get("role") != "inner"]
+            inner = [to_line(m["geometry"]) for m in pieces if m.get("role") == "inner"]
+            shapes.append(to_area(outer).difference(to_area(inner)))
+
+    shapes = geopandas.GeoSeries(shapes, crs="EPSG:4326").make_valid()
+    return shapes[~shapes.is_empty]
+
+
 # --- Combining --------------------------------------------------------------
 
 def update_swiss_population(table):
@@ -149,47 +193,88 @@ def update_swiss_population(table):
     return table.drop(columns=["new_population", "new_area_km2"])
 
 
-def sum_per_municipality(table, country, raster_path):
-    """Add up the values of a satellite map inside each municipality of one country.
+def read_grid(path, window_bounds):
+    """Read the part of a satellite map inside window_bounds.
 
-    The map is a grid of 100 m cells. We paint every municipality onto the
-    same grid with its row number, then add up the values of all cells that
-    carry the same number.
+    Returns the values, and the "transform" that says where each cell is.
     """
-    shapes = table[table["country"] == country]
-
-    with rasterio.open(raster_path) as raster:
-        shapes = shapes.to_crs(raster.crs)  # same map projection as the grid
-        left, bottom, right, top = shapes.total_bounds
+    with rasterio.open(path) as raster:
+        left, bottom, right, top = window_bounds
         if (left < raster.bounds.left or right > raster.bounds.right
                 or bottom < raster.bounds.bottom or top > raster.bounds.top):
-            print(f"  WARNING: {country} reaches beyond {raster_path.name}")
+            print(f"  WARNING: the area reaches beyond {path.name}")
         window = rasterio.windows.from_bounds(left, bottom, right, top, raster.transform)
         window = window.round_offsets().round_lengths()
         values = raster.read(1, window=window).astype("float64")
         values[values == raster.nodata] = 0
-        transform = raster.window_transform(window)
+        return values, raster.window_transform(window), raster.crs
+
+
+def sums_for_country(table, country, industrial):
+    """Add up building footprint and volume inside each municipality.
+
+    The satellite maps are grids of 100 m cells. We paint every municipality
+    onto the same grid with its row number, then add up the values of all
+    cells that carry the same number. Cells on industrial land are added up
+    a second time separately.
+    """
+    shapes = table[table["country"] == country]
+    with rasterio.open(RAW_DIR / f"built_up_{country}.tif") as raster:
+        shapes = shapes.to_crs(raster.crs)  # same map projection as the grid
+    bounds = shapes.total_bounds
+
+    surface, transform, crs = read_grid(RAW_DIR / f"built_up_{country}.tif", bounds)
+    volume, _, _ = read_grid(RAW_DIR / f"built_volume_{country}.tif", bounds)
 
     numbered = [(shape, number) for number, shape in enumerate(shapes.geometry, start=1)]
-    zones = rasterio.features.rasterize(numbered, out_shape=values.shape,
+    zones = rasterio.features.rasterize(numbered, out_shape=surface.shape,
                                         transform=transform, fill=0, dtype="int32")
-    sums = numpy.bincount(zones.ravel(), weights=values.ravel(), minlength=len(shapes) + 1)
-    return pandas.Series(sums[1:], index=shapes.index)  # sums[0] is "outside"
+
+    if industrial is None or len(industrial) == 0:
+        on_industrial_land = numpy.zeros(surface.shape, dtype=bool)
+    else:
+        painted = rasterio.features.rasterize(list(industrial.to_crs(crs)),
+                                              out_shape=surface.shape, transform=transform,
+                                              fill=0, default_value=1, dtype="uint8")
+        on_industrial_land = painted == 1
+
+    def per_municipality(values):
+        sums = numpy.bincount(zones.ravel(), weights=values.ravel(), minlength=len(shapes) + 1)
+        return sums[1:]  # sums[0] is everything outside the country
+
+    return pandas.DataFrame({
+        "built_up_km2": per_municipality(surface) / 1_000_000,
+        "built_volume_m3": per_municipality(volume),
+        "industrial_built_up_km2": per_municipality(surface * on_industrial_land) / 1_000_000,
+        "industrial_built_volume_m3": per_municipality(volume * on_industrial_land),
+    }, index=shapes.index)
 
 
 def add_features(table):
     """Compute the numbers the model will learn from."""
     table["density"] = table["population"] / table["area_km2"]
     table["built_up_share"] = table["built_up_km2"] / table["area_km2"]
+    table["industrial_share"] = table["industrial_built_volume_m3"] / table["built_volume_m3"]
 
     # Where there are no inhabitants or no buildings, "per person" and
     # "height" make no sense, so those cells stay empty.
     people = table["population"].where(table["population"] > 0)
+
+    # Everything: homes, offices, shops, factories, barns.
     footprint_m2 = (table["built_up_km2"] * 1_000_000).where(table["built_up_km2"] > 0)
     table["built_up_m2_per_person"] = footprint_m2 / people
     table["built_volume_m3_per_person"] = table["built_volume_m3"] / people
     # Volume = footprint x height, so volume / footprint is the average height.
     table["average_height_m"] = table["built_volume_m3"] / footprint_m2
+
+    # The same three numbers without buildings on industrial land. Offices and
+    # shops stay in: they are part of what makes a place urban.
+    footprint_m2 = (table["built_up_km2"] - table["industrial_built_up_km2"]) * 1_000_000
+    footprint_m2 = footprint_m2.where(footprint_m2 > 0)
+    volume_m3 = table["built_volume_m3"] - table["industrial_built_volume_m3"]
+    table["town_built_up_m2_per_person"] = footprint_m2 / people
+    table["town_built_volume_m3_per_person"] = volume_m3 / people
+    table["town_average_height_m"] = volume_m3 / footprint_m2
 
     table["label_name"] = table["label"].map(LABEL_NAMES)
     return table
@@ -221,10 +306,18 @@ def report(path):
 
     print("\nTypical values (median) per class")
     table = pandas.read_sql(
-        "SELECT country, label, label_name, density, built_up_share, built_up_m2_per_person, "
-        "built_volume_m3_per_person, average_height_m FROM municipalities", connection)
+        "SELECT country, label, label_name, density, industrial_share, "
+        "built_volume_m3_per_person, town_built_volume_m3_per_person, "
+        "average_height_m, town_average_height_m FROM municipalities", connection)
     medians = table.groupby(["country", "label", "label_name"]).median().round(3)
     print(medians.to_string())
+
+    print("\nMost industrial (share of building volume on industrial land)")
+    for row in connection.execute("""
+            SELECT country, name, population, ROUND(100 * industrial_share) || '%'
+            FROM municipalities WHERE population > 5000
+            ORDER BY industrial_share DESC LIMIT 8"""):
+        print("  ", row)
 
     print("\nTallest on average")
     for row in connection.execute("""
@@ -260,16 +353,17 @@ def main():
     table = update_swiss_population(table)
 
     print("Adding up built-up surface and volume ...")
-    table["built_up_km2"] = 0.0
-    table["built_volume_m3"] = 0.0
+    parts = []
     for country in COUNTRIES:
-        square_metres = sum_per_municipality(table, country, RAW_DIR / f"built_up_{country}.tif")
-        cubic_metres = sum_per_municipality(table, country, RAW_DIR / f"built_volume_{country}.tif")
-        table.loc[square_metres.index, "built_up_km2"] = square_metres / 1_000_000
-        table.loc[cubic_metres.index, "built_volume_m3"] = cubic_metres
-        print(f"  {country}: {square_metres.sum() / 1_000_000:,.0f} km2 footprint, "
-              f"{cubic_metres.sum() / 1_000_000:,.0f} million m3 volume, "
-              f"average height {cubic_metres.sum() / square_metres.sum():.1f} m")
+        industrial = read_industrial(country)
+        sums = sums_for_country(table, country, industrial)
+        parts.append(sums)
+        total = sums.sum()
+        print(f"  {country}: {total['built_up_km2']:,.0f} km2 footprint, "
+              f"{total['built_volume_m3'] / 1_000_000:,.0f} million m3 volume, "
+              f"{100 * total['industrial_built_volume_m3'] / total['built_volume_m3']:.0f}% "
+              f"of the volume on industrial land")
+    table = table.join(pandas.concat(parts))
 
     table = add_features(table)
     table = table.drop(columns=["official_area_km2"])
