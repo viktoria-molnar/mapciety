@@ -4,8 +4,8 @@ Town or Cow - step 2: prepare the data.
 Turns the raw downloads into one clean table with one row per municipality:
 
     country, name, label (city / town or suburb / rural), city region,
-    population, area, density, built-up area, built-up share,
-    built-up area per inhabitant
+    population, area, density, built-up area and volume, built-up share,
+    built-up area and volume per inhabitant, average building height
 
 and saves it as data/municipalities.gpkg. That file holds the table and the
 boundaries together, and because a GeoPackage is an SQLite database, every
@@ -149,31 +149,31 @@ def update_swiss_population(table):
     return table.drop(columns=["new_population", "new_area_km2"])
 
 
-def built_up_per_municipality(table, country):
-    """Add up the built-up square metres inside each municipality of one country.
+def sum_per_municipality(table, country, raster_path):
+    """Add up the values of a satellite map inside each municipality of one country.
 
-    The satellite map is a grid of 100 m cells. We paint every municipality
-    onto the same grid with its row number, then add up the built-up values
-    of all cells that carry the same number.
+    The map is a grid of 100 m cells. We paint every municipality onto the
+    same grid with its row number, then add up the values of all cells that
+    carry the same number.
     """
     shapes = table[table["country"] == country]
 
-    with rasterio.open(RAW_DIR / f"built_up_{country}.tif") as raster:
+    with rasterio.open(raster_path) as raster:
         shapes = shapes.to_crs(raster.crs)  # same map projection as the grid
         left, bottom, right, top = shapes.total_bounds
         if (left < raster.bounds.left or right > raster.bounds.right
                 or bottom < raster.bounds.bottom or top > raster.bounds.top):
-            print(f"  WARNING: {country} reaches beyond its built-up tile")
+            print(f"  WARNING: {country} reaches beyond {raster_path.name}")
         window = rasterio.windows.from_bounds(left, bottom, right, top, raster.transform)
         window = window.round_offsets().round_lengths()
-        built = raster.read(1, window=window).astype("float64")
-        built[built == raster.nodata] = 0
+        values = raster.read(1, window=window).astype("float64")
+        values[values == raster.nodata] = 0
         transform = raster.window_transform(window)
 
     numbered = [(shape, number) for number, shape in enumerate(shapes.geometry, start=1)]
-    zones = rasterio.features.rasterize(numbered, out_shape=built.shape,
+    zones = rasterio.features.rasterize(numbered, out_shape=values.shape,
                                         transform=transform, fill=0, dtype="int32")
-    sums = numpy.bincount(zones.ravel(), weights=built.ravel(), minlength=len(shapes) + 1)
+    sums = numpy.bincount(zones.ravel(), weights=values.ravel(), minlength=len(shapes) + 1)
     return pandas.Series(sums[1:], index=shapes.index)  # sums[0] is "outside"
 
 
@@ -181,9 +181,16 @@ def add_features(table):
     """Compute the numbers the model will learn from."""
     table["density"] = table["population"] / table["area_km2"]
     table["built_up_share"] = table["built_up_km2"] / table["area_km2"]
-    # No inhabitants -> no sensible "per person" value, so leave it empty.
+
+    # Where there are no inhabitants or no buildings, "per person" and
+    # "height" make no sense, so those cells stay empty.
     people = table["population"].where(table["population"] > 0)
-    table["built_up_m2_per_person"] = table["built_up_km2"] * 1_000_000 / people
+    footprint_m2 = (table["built_up_km2"] * 1_000_000).where(table["built_up_km2"] > 0)
+    table["built_up_m2_per_person"] = footprint_m2 / people
+    table["built_volume_m3_per_person"] = table["built_volume_m3"] / people
+    # Volume = footprint x height, so volume / footprint is the average height.
+    table["average_height_m"] = table["built_volume_m3"] / footprint_m2
+
     table["label_name"] = table["label"].map(LABEL_NAMES)
     return table
 
@@ -214,16 +221,16 @@ def report(path):
 
     print("\nTypical values (median) per class")
     table = pandas.read_sql(
-        "SELECT country, label, label_name, density, built_up_share, built_up_m2_per_person "
-        "FROM municipalities", connection)
+        "SELECT country, label, label_name, density, built_up_share, built_up_m2_per_person, "
+        "built_volume_m3_per_person, average_height_m FROM municipalities", connection)
     medians = table.groupby(["country", "label", "label_name"]).median().round(3)
     print(medians.to_string())
 
-    print("\nMost built-up area per inhabitant")
+    print("\nTallest on average")
     for row in connection.execute("""
-            SELECT country, name, population, ROUND(built_up_m2_per_person)
+            SELECT country, name, population, ROUND(average_height_m, 1)
             FROM municipalities
-            ORDER BY built_up_m2_per_person DESC LIMIT 5"""):
+            ORDER BY average_height_m DESC LIMIT 8"""):
         print("  ", row)
 
     empty = connection.execute(
@@ -252,12 +259,17 @@ def main():
     print("Newer population for Switzerland ...")
     table = update_swiss_population(table)
 
-    print("Adding up built-up area ...")
+    print("Adding up built-up surface and volume ...")
     table["built_up_km2"] = 0.0
+    table["built_volume_m3"] = 0.0
     for country in COUNTRIES:
-        square_metres = built_up_per_municipality(table, country)
+        square_metres = sum_per_municipality(table, country, RAW_DIR / f"built_up_{country}.tif")
+        cubic_metres = sum_per_municipality(table, country, RAW_DIR / f"built_volume_{country}.tif")
         table.loc[square_metres.index, "built_up_km2"] = square_metres / 1_000_000
-        print(f"  {country}: {square_metres.sum() / 1_000_000:,.0f} km2 built-up in total")
+        table.loc[cubic_metres.index, "built_volume_m3"] = cubic_metres
+        print(f"  {country}: {square_metres.sum() / 1_000_000:,.0f} km2 footprint, "
+              f"{cubic_metres.sum() / 1_000_000:,.0f} million m3 volume, "
+              f"average height {cubic_metres.sum() / square_metres.sum():.1f} m")
 
     table = add_features(table)
     table = table.drop(columns=["official_area_km2"])

@@ -13,6 +13,7 @@ Downloads four things for Switzerland and Hungary into data/raw/ :
                             newer population figures (swisstopo)
   4. built_up_*.tif         how many square metres of each 100 m x 100 m cell
                             are covered by buildings (GHSL, from satellite images)
+     built_volume_*.tif     how many cubic metres of building stand on each cell
 
 Then it prints a short report, so we can see what we actually got before we
 build anything on top of it.
@@ -48,13 +49,17 @@ LABELS_URL = (
     "EU-27-LAU-2024-NUTS-2024.xlsx/12971f56-c035-dbab-4d9f-ff1dcc617bb3"
 )
 
-# The built-up map comes in square tiles of 1000 km. One tile per country.
-BUILT_UP_URL = (
+# The built-up maps come in square tiles of 1000 km. One tile per country.
+# There are two maps on the same grid:
+#   S = surface: square metres of each cell covered by buildings (footprint)
+#   V = volume:  cubic metres of building standing on each cell
+BUILT_URL = (
     "https://jeodpp.jrc.ec.europa.eu/ftp/jrc-opendata/GHSL/"
-    "GHS_BUILT_S_GLOBE_R2023A/GHS_BUILT_S_E2020_GLOBE_R2023A_54009_100/V1-0/tiles/"
-    "GHS_BUILT_S_E2020_GLOBE_R2023A_54009_100_V1_0_{tile}.zip"
+    "GHS_BUILT_{kind}_GLOBE_R2023A/GHS_BUILT_{kind}_E2020_GLOBE_R2023A_54009_100/V1-0/tiles/"
+    "GHS_BUILT_{kind}_E2020_GLOBE_R2023A_54009_100_V1_0_{tile}.zip"
 )
-BUILT_UP_TILES = {"CH": "R4_C19", "HU": "R4_C20"}
+BUILT_TILES = {"CH": "R4_C19", "HU": "R4_C20"}
+BUILT_FILES = {"S": "built_up", "V": "built_volume"}  # start of the file names
 
 # The Swiss population figures in the Eurostat file are older than the
 # Hungarian ones. The current swisstopo boundary file carries newer ones.
@@ -125,13 +130,15 @@ def get_swiss_population():
     return unzip_one(zip_path, ".gpkg", gpkg)
 
 
-def get_built_up(country):
-    tif = RAW_DIR / f"built_up_{country}.tif"
+def get_built(country, kind):
+    """kind is "S" for the surface map or "V" for the volume map."""
+    name = f"{BUILT_FILES[kind]}_{country}"
+    tif = RAW_DIR / f"{name}.tif"
     if tif.exists():
         print(f"  already there: {tif.name}")
         return tif
-    url = BUILT_UP_URL.format(tile=BUILT_UP_TILES[country])
-    zip_path = download(url, RAW_DIR / f"built_up_{country}.zip")
+    url = BUILT_URL.format(kind=kind, tile=BUILT_TILES[country])
+    zip_path = download(url, RAW_DIR / f"{name}.zip")
     return unzip_one(zip_path, ".tif", tif)
 
 
@@ -215,9 +222,9 @@ def report_swiss_population(path):
     connection.close()
 
 
-def report_built_up(path):
+def report_built(path):
     megabytes = path.stat().st_size / 1024 / 1024
-    print(f"\nBuilt-up area: {path.name}, {megabytes:.0f} MB")
+    print(f"\nBuilt-up map: {path.name}, {megabytes:.0f} MB")
 
 
 # --- Main program -----------------------------------------------------------
@@ -228,10 +235,12 @@ def main():
              ("Newer Swiss population (swisstopo)", get_swiss_population,
               report_swiss_population)]
     for country in COUNTRIES:
-        # country=country fixes the value now; without it both steps would
+        # country=country fixes the value now; without it every step would
         # use the last country in the list.
-        steps.append((f"Built-up area {country} (GHSL)",
-                      lambda country=country: get_built_up(country), report_built_up))
+        steps.append((f"Built-up surface {country} (GHSL)",
+                      lambda country=country: get_built(country, "S"), report_built))
+        steps.append((f"Built-up volume {country} (GHSL)",
+                      lambda country=country: get_built(country, "V"), report_built))
 
     files = []
     problems = []
