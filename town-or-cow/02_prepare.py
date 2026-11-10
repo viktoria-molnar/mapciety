@@ -6,7 +6,8 @@ Turns the raw downloads into one clean table with one row per municipality:
     country, name, label (city / town or suburb / rural), city region,
     population, area, density, built-up area and volume, built-up share,
     built-up area and volume per inhabitant, average building height,
-    and the same again without buildings on industrial land
+    the same again without buildings on industrial land, and four features
+    that describe the densest part of the municipality instead of its average
 
 and saves it as data/municipalities.gpkg. That file holds the table and the
 boundaries together, and because a GeoPackage is an SQLite database, every
@@ -27,6 +28,7 @@ import pandas
 import rasterio
 import rasterio.features
 import rasterio.windows
+import scipy.ndimage
 import shapely
 import shapely.ops
 from shapely.geometry import LineString, Polygon
@@ -39,6 +41,12 @@ LABEL_NAMES = {1: "city", 2: "town or suburb", 3: "rural"}
 DATA_DIR = Path(__file__).parent / "data"
 RAW_DIR = DATA_DIR / "raw"
 OUTPUT = DATA_DIR / "municipalities.gpkg"
+
+# A 1 km square counts as densely built if at least this share of it is
+# covered by buildings. Chosen to roughly match Eurostat's "1,500 inhabitants
+# per km2" at about 65 m2 of building footprint per person.
+DENSE_BUILT_UP_SHARE = 0.10
+CELLS_PER_KM = 10  # the maps have 100 m cells, so 10 x 10 cells make 1 km2
 
 # A Swiss municipality whose area differs by more than this between the two
 # sources has probably merged with a neighbour since 2024.
@@ -205,9 +213,94 @@ def read_grid(path, window_bounds):
             print(f"  WARNING: the area reaches beyond {path.name}")
         window = rasterio.windows.from_bounds(left, bottom, right, top, raster.transform)
         window = window.round_offsets().round_lengths()
+        # Start and end on multiples of 10 cells. The 1 km squares used for
+        # the "densely built" features then always lie on the same fixed
+        # grid, wherever the country's outline happens to begin.
+        first_column = int(window.col_off) // CELLS_PER_KM * CELLS_PER_KM
+        first_row = int(window.row_off) // CELLS_PER_KM * CELLS_PER_KM
+        last_column = min(-(-int(window.col_off + window.width) // CELLS_PER_KM) * CELLS_PER_KM,
+                          raster.width)
+        last_row = min(-(-int(window.row_off + window.height) // CELLS_PER_KM) * CELLS_PER_KM,
+                       raster.height)
+        window = rasterio.windows.Window(first_column, first_row,
+                                         last_column - first_column, last_row - first_row)
         values = raster.read(1, window=window).astype("float64")
         values[values == raster.nodata] = 0
         return values, raster.window_transform(window), raster.crs
+
+
+def sum_blocks(values):
+    """Add up a 100 m grid in blocks of 10 x 10 cells, giving a 1 km grid."""
+    rows, columns = values.shape
+    padded = numpy.zeros((-(-rows // CELLS_PER_KM) * CELLS_PER_KM,
+                          -(-columns // CELLS_PER_KM) * CELLS_PER_KM))
+    padded[:rows, :columns] = values
+    return padded.reshape(padded.shape[0] // CELLS_PER_KM, CELLS_PER_KM,
+                          padded.shape[1] // CELLS_PER_KM, CELLS_PER_KM).sum(axis=(1, 3))
+
+
+def core_features(zones, surface, volume, count):
+    """Describe the densest part of each municipality instead of its average.
+
+    An average over the whole territory makes a compact city surrounded by
+    farmland look like a village. These features ignore the empty land.
+    They are computed without the buildings on industrial land.
+
+    core_built_up_share  share of the municipality's densest square
+                         kilometre that is covered by buildings
+    core_height_m        average building height in that square kilometre
+    dense_share          share of the municipality's building volume that
+                         stands in densely built 1 km squares
+    patch_volume_m3      size (building volume) of the connected densely
+                         built area the municipality belongs to. This area
+                         may spread over many municipalities, so a suburb
+                         gets the size of the whole city it is part of.
+    """
+    inside = zones > 0
+    zone, footprint, bulk = zones[inside], surface[inside], volume[inside]
+
+    def per_municipality(values, cells=slice(None)):
+        return numpy.bincount(zone[cells], weights=values[cells], minlength=count + 1)[1:]
+
+    # 1. The densest square kilometre: the 100 cells with the most building
+    #    volume. Sort the cells by municipality and, within each, by volume.
+    order = numpy.lexsort((-bulk, zone))
+    sorted_zone = zone[order]
+    place_in_zone = numpy.arange(len(order)) - numpy.searchsorted(sorted_zone, sorted_zone)
+    top = order[place_in_zone < CELLS_PER_KM ** 2]
+    top_cells = per_municipality(numpy.ones(len(zone)), top)
+    top_footprint = per_municipality(footprint, top)
+    top_bulk = per_municipality(bulk, top)
+
+    # 2. Densely built 1 km squares, and the connected patches they form.
+    dense_square = sum_blocks(surface) >= DENSE_BUILT_UP_SHARE * 1_000_000
+    patch_of_square, patch_count = scipy.ndimage.label(dense_square)
+    patch_volume = scipy.ndimage.sum(sum_blocks(volume), patch_of_square,
+                                     index=numpy.arange(patch_count + 1))
+    patch_volume[0] = 0  # number 0 means "not in any dense patch"
+    # back from the 1 km grid to the 100 m grid: every cell gets its square's patch
+    patch_of_cell = numpy.repeat(numpy.repeat(patch_of_square, CELLS_PER_KM, axis=0),
+                                 CELLS_PER_KM, axis=1)[:zones.shape[0], :zones.shape[1]]
+    patch = patch_of_cell[inside]
+    in_patch = patch > 0
+
+    # Which patch holds most of each municipality's building volume?
+    cells = pandas.DataFrame({"zone": zone[in_patch], "patch": patch[in_patch],
+                              "volume": bulk[in_patch]})
+    per_pair = cells.groupby(["zone", "patch"], as_index=False)["volume"].sum()
+    main = per_pair.sort_values("volume").groupby("zone").tail(1)
+    main_patch_volume = numpy.zeros(count + 1)
+    main_patch_volume[main["zone"]] = patch_volume[main["patch"]]
+
+    total_bulk = per_municipality(bulk)
+    with numpy.errstate(divide="ignore", invalid="ignore"):
+        return {
+            "core_built_up_share": top_footprint / (top_cells * 10_000),
+            "core_height_m": numpy.where(top_footprint > 0, top_bulk / top_footprint, numpy.nan),
+            "dense_share": numpy.where(total_bulk > 0,
+                                       per_municipality(bulk * in_patch) / total_bulk, 0),
+            "patch_volume_m3": main_patch_volume[1:],
+        }
 
 
 def sums_for_country(table, country, industrial):
@@ -247,6 +340,10 @@ def sums_for_country(table, country, industrial):
         "built_volume_m3": per_municipality(volume),
         "industrial_built_up_km2": per_municipality(surface * on_industrial_land) / 1_000_000,
         "industrial_built_volume_m3": per_municipality(volume * on_industrial_land),
+        # The core features leave out buildings on industrial land: a cement
+        # works or a power station is big and tall, but it is not a town.
+        **core_features(zones, surface * ~on_industrial_land,
+                        volume * ~on_industrial_land, len(shapes)),
     }, index=shapes.index)
 
 
@@ -311,6 +408,23 @@ def report(path):
         "average_height_m, town_average_height_m FROM municipalities", connection)
     medians = table.groupby(["country", "label", "label_name"]).median().round(3)
     print(medians.to_string())
+
+    print("\nThe densest part of each municipality (median per class)")
+    cores = pandas.read_sql(
+        "SELECT country, label, label_name, core_built_up_share, core_height_m, dense_share, "
+        "patch_volume_m3 / 1000000 AS patch_million_m3 FROM municipalities", connection)
+    print(cores.groupby(["country", "label", "label_name"]).median().round(2).to_string())
+
+    print("\nLargest connected densely built areas (million m3 of building)")
+    for row in connection.execute("""
+            SELECT country, ROUND(patch_volume_m3 / 1000000) AS size, COUNT(*) AS municipalities,
+                   (SELECT name FROM municipalities AS biggest
+                    WHERE biggest.country = municipalities.country
+                      AND biggest.patch_volume_m3 = municipalities.patch_volume_m3
+                    ORDER BY population DESC LIMIT 1) AS around
+            FROM municipalities WHERE patch_volume_m3 > 0
+            GROUP BY country, patch_volume_m3 ORDER BY patch_volume_m3 DESC LIMIT 8"""):
+        print("  ", row)
 
     print("\nMost industrial (share of building volume on industrial land)")
     for row in connection.execute("""
