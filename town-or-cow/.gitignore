@@ -1,0 +1,8 @@
+# Downloaded and generated data stays on your computer
+data/
+
+# Python leftovers
+__pycache__/
+*.pyc
+.venv/
+.ipynb_checkpoints/

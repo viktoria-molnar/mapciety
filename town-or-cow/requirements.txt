@@ -1,0 +1,7 @@
+requests
+openpyxl
+pandas
+geopandas
+rasterio
+scikit-learn
+matplotlib
