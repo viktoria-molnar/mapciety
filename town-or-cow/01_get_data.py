@@ -1,14 +1,17 @@
 """
 Town or Cow - step 1: get the data.
 
-Downloads three things for Switzerland and Hungary into data/raw/ :
+Downloads four things for Switzerland and Hungary into data/raw/ :
 
   1. lau_2024.gpkg          boundaries of every municipality in Europe, with
                             population and area (Eurostat GISCO, "LAU" = local
                             administrative unit = municipality)
   2. lau_labels_2024.xlsx   Eurostat's list of municipalities, which should
                             carry the official "degree of urbanisation" label
-  3. built_up_*.tif         how many square metres of each 100 m x 100 m cell
+  3. swissboundaries3d_2026.gpkg
+                            the current Swiss boundary file, used only for its
+                            newer population figures (swisstopo)
+  4. built_up_*.tif         how many square metres of each 100 m x 100 m cell
                             are covered by buildings (GHSL, from satellite images)
 
 Then it prints a short report, so we can see what we actually got before we
@@ -52,6 +55,13 @@ BUILT_UP_URL = (
     "GHS_BUILT_S_E2020_GLOBE_R2023A_54009_100_V1_0_{tile}.zip"
 )
 BUILT_UP_TILES = {"CH": "R4_C19", "HU": "R4_C20"}
+
+# The Swiss population figures in the Eurostat file are older than the
+# Hungarian ones. The current swisstopo boundary file carries newer ones.
+SWISS_URL = (
+    "https://data.geo.admin.ch/ch.swisstopo.swissboundaries3d/"
+    "swissboundaries3d_2026-01/swissboundaries3d_2026-01_2056_5728.gpkg.zip"
+)
 
 # Public services like to know who is calling them.
 HEADERS = {"User-Agent": "town-or-cow (30DayMapChallenge learning project)"}
@@ -104,6 +114,15 @@ def get_boundaries():
 
 def get_labels():
     return download(LABELS_URL, RAW_DIR / "lau_labels_2024.xlsx")
+
+
+def get_swiss_population():
+    gpkg = RAW_DIR / "swissboundaries3d_2026.gpkg"
+    if gpkg.exists():
+        print(f"  already there: {gpkg.name}")
+        return gpkg
+    zip_path = download(SWISS_URL, RAW_DIR / "swissboundaries3d_2026.gpkg.zip")
+    return unzip_one(zip_path, ".gpkg", gpkg)
 
 
 def get_built_up(country):
@@ -179,6 +198,23 @@ def report_labels(path):
     workbook.close()
 
 
+def report_swiss_population(path):
+    connection = sqlite3.connect(path)
+    tables = [row[0] for row in connection.execute("SELECT table_name FROM gpkg_contents")]
+    print(f"\nNewer Swiss population: layers {tables}")
+    for table in tables:
+        if "hoheitsgebiet" not in table.lower():
+            continue
+        columns = [row[1] for row in connection.execute(f'PRAGMA table_info("{table}")')]
+        total = connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+        print(f"  {table}: {total} rows")
+        print(f"    columns: {', '.join(columns)}")
+        example = connection.execute(f'SELECT * FROM "{table}" LIMIT 1').fetchone()
+        shown = [f"{c}={v}" for c, v in zip(columns, example) if not isinstance(v, bytes)]
+        print(f"    example row: {', '.join(shown)}")
+    connection.close()
+
+
 def report_built_up(path):
     megabytes = path.stat().st_size / 1024 / 1024
     print(f"\nBuilt-up area: {path.name}, {megabytes:.0f} MB")
@@ -188,7 +224,9 @@ def report_built_up(path):
 
 def main():
     steps = [("Boundaries and population (Eurostat GISCO)", get_boundaries, report_boundaries),
-             ("Urban / rural labels (Eurostat)", get_labels, report_labels)]
+             ("Urban / rural labels (Eurostat)", get_labels, report_labels),
+             ("Newer Swiss population (swisstopo)", get_swiss_population,
+              report_swiss_population)]
     for country in COUNTRIES:
         # country=country fixes the value now; without it both steps would
         # use the last country in the list.
