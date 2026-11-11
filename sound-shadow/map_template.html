@@ -1,0 +1,401 @@
+<title>Sound Shadow</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..125,400..800&family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500&display=swap">
+<style>
+/* Layout: a full-screen 3D scene at night, with one quiet instrument panel in the corner. */
+:root {
+  --night: #0b0c10;
+  --panel: rgba(16, 17, 23, 0.86);
+  --line: #2a2c36;
+  --ink: #ecebf2;
+  --muted: #9a98aa;
+  --glow: #f68f3c;
+  --display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --body: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+  color-scheme: dark;
+}
+html, body { height: 100%; }
+body { background: var(--night); color: var(--ink); font-family: var(--body); overflow: hidden; }
+#scene { position: fixed; inset: 0; }
+#scene canvas { display: block; touch-action: none; }
+
+.panel {
+  position: fixed;
+  top: calc(16px + env(safe-area-inset-top, 0px));
+  left: max(16px, env(safe-area-inset-left, 0px));
+  width: min(340px, calc(100vw - 32px));
+  max-height: calc(100% - 32px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 18px 18px 16px;
+  display: grid;
+  gap: 14px;
+  backdrop-filter: blur(6px);
+}
+h1 {
+  margin: 0;
+  font-family: var(--display);
+  font-stretch: 118%;
+  font-weight: 800;
+  font-size: 1.85rem;
+  letter-spacing: -0.01em;
+  line-height: 1;
+  text-wrap: balance;
+}
+.place { margin: 4px 0 0; font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.lede { margin: 0; font-size: 0.86rem; line-height: 1.5; color: var(--ink); }
+
+.switch { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+.switch button {
+  appearance: none; border: 0; background: transparent; color: var(--muted);
+  font: 500 0.8rem var(--body); padding: 8px 6px; cursor: pointer;
+}
+.switch button[aria-pressed="true"] { background: #23242e; color: var(--ink); }
+.switch button:focus-visible, .reset:focus-visible, .toggle:focus-visible { outline: 2px solid var(--glow); outline-offset: 2px; }
+
+.legend { display: grid; gap: 6px; }
+.legend .bar { position: relative; height: 12px; border-radius: 3px; }
+.legend .ticks { position: relative; height: 16px; font-family: var(--mono); font-size: 0.68rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.legend .ticks span { position: absolute; transform: translateX(-50%); }
+.legend .who { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--ink); }
+.legend .caption { font-size: 0.74rem; color: var(--muted); line-height: 1.45; }
+.legend .caption b { color: var(--ink); font-weight: 500; }
+
+.notes { margin: 0; padding: 0; list-style: none; display: grid; gap: 7px; font-size: 0.76rem; line-height: 1.45; color: var(--muted); }
+.notes li { padding-left: 14px; position: relative; }
+.notes li::before { content: ""; position: absolute; left: 0; top: 0.55em; width: 6px; height: 1px; background: var(--muted); }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.reset, .toggle {
+  appearance: none; border: 1px solid var(--line); background: transparent; color: var(--ink);
+  font: 500 0.76rem var(--body); padding: 6px 10px; border-radius: 6px; cursor: pointer;
+}
+.source { font-size: 0.68rem; color: var(--muted); line-height: 1.45; }
+
+#tip {
+  position: fixed; pointer-events: none; z-index: 5;
+  background: rgba(12, 12, 17, 0.94); border: 1px solid var(--line); border-radius: 7px;
+  padding: 8px 10px; font-size: 0.78rem; line-height: 1.4; min-width: 150px;
+  font-variant-numeric: tabular-nums;
+}
+#tip .db { font-family: var(--display); font-stretch: 110%; font-weight: 700; font-size: 1.25rem; }
+#tip .meta { color: var(--muted); font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.04em; }
+
+.compass {
+  position: fixed; right: max(16px, env(safe-area-inset-right, 0px)); bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  width: 46px; height: 46px; border-radius: 50%; border: 1px solid var(--line); background: var(--panel);
+  display: grid; place-items: center; font: 600 0.72rem var(--mono); color: var(--muted);
+}
+.compass i { position: absolute; top: 5px; left: 50%; width: 2px; height: 14px; margin-left: -1px; background: var(--glow); border-radius: 1px; }
+.compass span { margin-top: 16px; }
+
+.collapsed > :not(.head) { display: none; }
+.head { display: flex; justify-content: space-between; gap: 10px; align-items: start; }
+
+@media (max-width: 560px) {
+  .panel { top: auto; bottom: calc(12px + env(safe-area-inset-bottom, 0px)); padding: 14px; gap: 11px; max-height: 58%; }
+  h1 { font-size: 1.5rem; }
+  .compass { top: calc(16px + env(safe-area-inset-top, 0px)); bottom: auto; }
+}
+</style>
+
+<div id="scene" aria-label="3D view of Elephant & Castle with road noise shown on every floor of every building"></div>
+
+<section class="panel" id="panel">
+  <div class="head">
+    <div>
+      <h1>Sound Shadow</h1>
+      <p class="place">Elephant &amp; Castle · London SE1</p>
+    </div>
+    <button class="toggle" id="collapse" aria-expanded="true">Hide</button>
+  </div>
+  <p class="lede">Road noise on every floor of every facade. Bright walls face the traffic. Dark walls are in the sound shadow of another building, or of their own.</p>
+  <div class="switch" role="group" aria-label="Time of day">
+    <button id="m-lden" aria-pressed="true">Day &amp; night</button>
+    <button id="m-lnight" aria-pressed="false">Night only</button>
+  </div>
+  <div class="legend">
+    <div class="bar" id="bar"><div class="who" id="who"></div></div>
+    <div class="ticks" id="ticks"></div>
+    <div class="caption" id="caption"></div>
+  </div>
+  <ul class="notes">
+    <li>The ground shows the official 2022 road noise map, calculated 4 m above the street.</li>
+    <li>The walls show a model trained on that map. It was tested on streets it never saw and is off by 2.8 dB on average. Above the 2nd floor nothing official exists to check it against.</li>
+    <li>Only road traffic counts. The railway viaduct is not included.</li>
+  </ul>
+  <div class="row">
+    <button class="reset" id="reset">Reset view</button>
+    <span class="source">Drag to turn · scroll or pinch to zoom · hover a wall for its floor</span>
+  </div>
+  <p class="source">Data: Defra strategic noise mapping 2022 and Environment Agency lidar (Open Government Licence), © OpenStreetMap contributors (ODbL).</p>
+</section>
+
+<div class="compass" aria-hidden="true"><i id="needle"></i><span>N</span></div>
+<div id="tip" hidden></div>
+
+<script type="application/json" id="data">__DATA__</script>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+const D = JSON.parse(document.getElementById("data").textContent);
+const FH = D.floor_height;
+
+// ---- colour: one ramp for ground and walls, dark = quiet, bright = loud ----
+const STOPS = [[0, "#121019"], [0.2, "#2c1a55"], [0.4, "#6e1f6e"], [0.58, "#b8325e"], [0.75, "#ef6a3a"], [0.9, "#fbb14a"], [1, "#fdf0b2"]];
+const RAMP = STOPS.map(([t, h]) => [t, new THREE.Color(h)]);
+const SCALE = { lden: [45, 80], lnight: [35, 72] };
+const WHO = { lden: 53, lnight: 45 };
+let metric = "lden";
+function colourFor(db, out) {
+  const [lo, hi] = SCALE[metric];
+  const t = Math.min(1, Math.max(0, (db - lo) / (hi - lo)));
+  for (let i = 1; i < RAMP.length; i++) {
+    if (t <= RAMP[i][0]) {
+      const a = RAMP[i - 1], b = RAMP[i];
+      return out.copy(a[1]).lerp(b[1], (t - a[0]) / (b[0] - a[0]));
+    }
+  }
+  return out.copy(RAMP[RAMP.length - 1][1]);
+}
+
+// ---- scene ----
+const host = document.getElementById("scene");
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(host.clientWidth, host.clientHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+host.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color("#0b0c10");
+scene.fog = new THREE.Fog("#0b0c10", 1100, 2200);
+const camera = new THREE.PerspectiveCamera(35, host.clientWidth / host.clientHeight, 5, 6000);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.maxPolarAngle = Math.PI * 0.47;
+controls.minDistance = 60;
+controls.maxDistance = 2200;
+const HOME = { pos: new THREE.Vector3(-520, 610, 760), target: new THREE.Vector3(10, 0, -10) };
+function home() { camera.position.copy(HOME.pos); controls.target.copy(HOME.target); controls.update(); }
+home();
+scene.add(new THREE.HemisphereLight("#8f95b8", "#1a1620", 1.1));
+const sun = new THREE.DirectionalLight("#ffffff", 0.9);
+sun.position.set(-300, 600, 200);
+scene.add(sun);
+
+// x = east, y = up, z = south (three.js convention), all in metres from the map centre
+const X = (e) => e, Z = (n) => -n;
+
+// ---- ground: the official 4 m noise map ----
+const G = D.ground;
+const canvas = document.createElement("canvas");
+canvas.width = G.cols; canvas.height = G.rows;
+const ctx = canvas.getContext("2d");
+const img = ctx.createImageData(G.cols, G.rows);
+const groundTexture = new THREE.CanvasTexture(canvas);
+groundTexture.colorSpace = THREE.SRGBColorSpace;
+groundTexture.magFilter = THREE.LinearFilter;
+function paintGround() {
+  const c = new THREE.Color();
+  const values = G[metric];
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i];
+    if (v <= 0) { img.data.set([18, 16, 25, 255], i * 4); continue; }
+    colourFor(v, c);
+    // A little darker than the walls, so the buildings stay the brightest thing.
+    img.data[i * 4] = c.r * 255 * 0.62;
+    img.data[i * 4 + 1] = c.g * 255 * 0.62;
+    img.data[i * 4 + 2] = c.b * 255 * 0.62;
+    img.data[i * 4 + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  groundTexture.needsUpdate = true;
+}
+const groundMesh = new THREE.Mesh(
+  new THREE.PlaneGeometry(G.cols * G.cell, G.rows * G.cell),
+  new THREE.MeshBasicMaterial({ map: groundTexture })
+);
+groundMesh.rotation.x = -Math.PI / 2;
+groundMesh.position.set(G.left + (G.cols * G.cell) / 2, -0.05, -(G.top - (G.rows * G.cell) / 2));
+scene.add(groundMesh);
+
+// ---- roofs ----
+{
+  const pos = [], edge = [];
+  for (const part of D.parts) {
+    const y = part.f * FH;
+    const rings = part.r.map((ring) => ring.map(([e, n]) => new THREE.Vector2(e, n)));
+    const outer = rings[0], holes = rings.slice(1);
+    const all = outer.concat(...holes);
+    const tris = THREE.ShapeUtils.triangulateShape(outer, holes);
+    for (const t of tris) for (const k of t) pos.push(X(all[k].x), y, Z(all[k].y));
+    for (const ring of rings) for (let i = 0; i < ring.length - 1; i++) {
+      edge.push(X(ring[i].x), y + 0.05, Z(ring[i].y), X(ring[i + 1].x), y + 0.05, Z(ring[i + 1].y));
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  g.computeVertexNormals();
+  scene.add(new THREE.Mesh(g, new THREE.MeshLambertMaterial({ color: "#4a4e5c", side: THREE.DoubleSide })));
+  const e = new THREE.BufferGeometry();
+  e.setAttribute("position", new THREE.Float32BufferAttribute(edge, 3));
+  scene.add(new THREE.LineSegments(e, new THREE.LineBasicMaterial({ color: "#9aa0b4", transparent: true, opacity: 0.55 })));
+}
+
+// ---- walls: a dark backing per wall, then one lit panel per floor ----
+const W = D.walls;          // [x0, y0, x1, y1, firstFloor, floorCount, building] per wall
+const VALUES = D.values;    // per floor panel: lden, lnight
+const panels = [];          // panel index -> [wall, floor, valueIndex]
+let wallMesh, wallColours;
+{
+  const back = [], pos = [];
+  let v = 0;
+  for (let w = 0; w < W.length; w += 7) {
+    const [x0, y0, x1, y1, f0, n] = W.slice(w, w + 6);
+    const a = [X(x0), Z(y0)], b = [X(x1), Z(y1)];
+    const base = f0 * FH, top = (f0 + n) * FH;
+    back.push(a[0], base, a[1], b[0], base, b[1], b[0], top, b[1], a[0], base, a[1], b[0], top, b[1], a[0], top, a[1]);
+    for (let k = 0; k < n; k++) {
+      const z0 = (f0 + k) * FH + 0.22, z1 = (f0 + k + 1) * FH - 0.22;
+      pos.push(a[0], z0, a[1], b[0], z0, b[1], b[0], z1, b[1], a[0], z0, a[1], b[0], z1, b[1], a[0], z1, a[1]);
+      panels.push([w / 7, f0 + k, v]);
+      v += 1;
+    }
+  }
+  const gb = new THREE.BufferGeometry();
+  gb.setAttribute("position", new THREE.Float32BufferAttribute(back, 3));
+  scene.add(new THREE.Mesh(gb, new THREE.MeshBasicMaterial({ color: "#16161d", side: THREE.DoubleSide })));
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  wallColours = new Float32Array(pos.length);
+  g.setAttribute("color", new THREE.BufferAttribute(wallColours, 3));
+  wallMesh = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide,
+    polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }));
+  scene.add(wallMesh);
+}
+function paintWalls() {
+  const c = new THREE.Color();
+  const column = metric === "lden" ? 0 : 1;
+  for (let p = 0; p < panels.length; p++) {
+    colourFor(VALUES[panels[p][2] * 2 + column], c);
+    for (let k = 0; k < 6; k++) wallColours.set([c.r, c.g, c.b], (p * 6 + k) * 3);
+  }
+  wallMesh.geometry.attributes.color.needsUpdate = true;
+}
+
+// ---- legend ----
+function paintLegend() {
+  const [lo, hi] = SCALE[metric];
+  const bar = document.getElementById("bar");
+  bar.style.background = "linear-gradient(90deg," + STOPS.map(([t, h]) => h + " " + t * 100 + "%").join(",") + ")";
+  const ticks = document.getElementById("ticks");
+  ticks.innerHTML = "";
+  const step = 5;
+  for (let d = Math.ceil(lo / step) * step; d <= hi; d += step) {
+    const s = document.createElement("span");
+    s.style.left = ((d - lo) / (hi - lo)) * 100 + "%";
+    s.textContent = d;
+    ticks.appendChild(s);
+  }
+  document.getElementById("who").style.left = ((WHO[metric] - lo) / (hi - lo)) * 100 + "%";
+  document.getElementById("caption").innerHTML = metric === "lden"
+    ? "Decibels, averaged over a whole day with evening and night weighted up (L<sub>den</sub>). The white mark is the WHO guideline for road traffic, <b>53 dB</b>. Every 10 dB sounds roughly twice as loud."
+    : "Decibels, averaged over 11 pm to 7 am (L<sub>night</sub>). The white mark is the WHO guideline for road traffic at night, <b>45 dB</b>. Every 10 dB sounds roughly twice as loud.";
+}
+
+function setMetric(m) {
+  metric = m;
+  document.getElementById("m-lden").setAttribute("aria-pressed", m === "lden");
+  document.getElementById("m-lnight").setAttribute("aria-pressed", m === "lnight");
+  paintGround(); paintWalls(); paintLegend();
+}
+document.getElementById("m-lden").onclick = () => setMetric("lden");
+document.getElementById("m-lnight").onclick = () => setMetric("lnight");
+document.getElementById("reset").onclick = home;
+document.getElementById("collapse").onclick = (event) => {
+  const panel = document.getElementById("panel");
+  const shut = panel.classList.toggle("collapsed");
+  event.target.textContent = shut ? "Show" : "Hide";
+  event.target.setAttribute("aria-expanded", String(!shut));
+};
+setMetric("lden");
+
+// ---- hover ----
+const tip = document.getElementById("tip");
+const ray = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+const COMPASS = ["north", "north-east", "east", "south-east", "south", "south-west", "west", "north-west"];
+function facing(w) {
+  const [x0, y0, x1, y1] = W.slice(w * 7, w * 7 + 4);
+  const v = D.facing[w];
+  return COMPASS[((v % 8) + 8) % 8];
+}
+function floorName(f) { return f === 0 ? "Ground floor" : "Floor " + f; }
+let pending = null;
+renderer.domElement.addEventListener("pointermove", (event) => { pending = event; });
+renderer.domElement.addEventListener("pointerleave", () => { pending = null; tip.hidden = true; });
+function hover() {
+  if (!pending) return;
+  const event = pending; pending = null;
+  const box = renderer.domElement.getBoundingClientRect();
+  mouse.set(((event.clientX - box.left) / box.width) * 2 - 1, -((event.clientY - box.top) / box.height) * 2 + 1);
+  ray.setFromCamera(mouse, camera);
+  const hit = ray.intersectObject(wallMesh, false)[0];
+  if (!hit) { tip.hidden = true; return; }
+  const [w, floor, v] = panels[Math.floor(hit.faceIndex / 2)];
+  const name = D.names[W[w * 7 + 6]] || "";
+  const day = VALUES[v * 2], night = VALUES[v * 2 + 1];
+  tip.innerHTML = '<div class="meta">' + floorName(floor).toUpperCase() + " · FACES " + facing(w).toUpperCase() + "</div>"
+    + '<div class="db">' + (metric === "lden" ? day : night).toFixed(0) + " dB</div>"
+    + "<div>" + (metric === "lden" ? "Night only: " + night.toFixed(0) + " dB" : "Day &amp; night: " + day.toFixed(0) + " dB") + "</div>"
+    + (name ? '<div class="meta">' + name + "</div>" : "");
+  tip.hidden = false;
+  const x = Math.min(event.clientX + 14, window.innerWidth - tip.offsetWidth - 8);
+  const y = Math.min(event.clientY + 14, window.innerHeight - tip.offsetHeight - 8);
+  tip.style.left = x + "px"; tip.style.top = y + "px";
+}
+
+// ---- loop ----
+const needle = document.getElementById("needle").parentElement;
+function frame() {
+  controls.update();
+  hover();
+  const angle = Math.atan2(camera.position.x - controls.target.x, camera.position.z - controls.target.z);
+  needle.style.transform = "rotate(" + angle + "rad)";
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+frame();
+window.addEventListener("resize", () => {
+  camera.aspect = host.clientWidth / host.clientHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(host.clientWidth, host.clientHeight);
+});
+// Hooks used by the script that renders still images.
+window.__view = {
+  project(x, y, z) {
+    const v = new THREE.Vector3(x, y, z).project(camera);
+    return [(v.x + 1) / 2 * host.clientWidth, (1 - v.y) / 2 * host.clientHeight];
+  },
+  look(position, target) { camera.position.set(...position); controls.target.set(...target); controls.update(); },
+  pick(x, y) {
+    mouse.set((x / host.clientWidth) * 2 - 1, -(y / host.clientHeight) * 2 + 1);
+    ray.setFromCamera(mouse, camera);
+    const hit = ray.intersectObject(wallMesh, false)[0];
+    if (!hit) return null;
+    const [w, floor, v] = panels[Math.floor(hit.faceIndex / 2)];
+    return { wall: w, floor, building: W[w * 7 + 6], lden: VALUES[v * 2], point: [hit.point.x, hit.point.y, hit.point.z] };
+  },
+};
+window.__ready = true;
+</script>
