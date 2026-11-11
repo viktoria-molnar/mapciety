@@ -37,8 +37,11 @@ Averages over a whole municipality are misleading when its boundary includes a l
 |---|---|
 | `core_built_up_share` | Share of the municipality's densest square kilometre covered by buildings |
 | `core_height_m` | Average building height in that square kilometre |
-| `dense_share` | Share of the municipality's building volume standing in densely built 1 km squares (at least 10% covered by buildings) |
-| `patch_volume_m3` | Size of the connected densely built area the municipality belongs to. It can spread over many municipalities, so a suburb gets the size of the whole city it is part of |
+| `dense_share` | Share of the municipality's building volume standing in 1 km squares of at least town density |
+| `town_area_m3` | Size (building volume) of the connected built-up area of at least town density that the municipality belongs to. It can spread over many municipalities, so a suburb gets the size of the whole area it is part of |
+| `city_area_m3` | The same, counting only squares of city density |
+
+The satellite sees buildings, not people. "Town density" and "city density" are Eurostat's own thresholds (300 and 1,500 inhabitants per km²), translated into building volume at 450 m³ per person. In both countries there are roughly 400 to 550 m³ of non-industrial building per inhabitant, and that figure hardly differs between cities and villages, which makes volume a far better stand-in for people than ground cover: a village of single-storey houses on large plots covers a lot of ground but holds few people.
 
 Factories and warehouses are large buildings that nobody lives in, and they make a place look bigger than it feels. So the last three features exist twice: once for all buildings, and once without the buildings on industrial land (columns starting with `town_`). Offices and shops stay in both, because they are part of what makes a place urban. A further feature, `industrial_share`, is the part of the building volume that stands on industrial land.
 
@@ -70,7 +73,9 @@ One source for both countries, so the same definition of "urban" applies to both
 | 1 | `01_get_data.py` | Download the datasets and print what is in them | Data acquisition |
 | 2 | `02_prepare.py` | Add up built-up area per municipality, compute density, store one table in SQLite | Preparing data, SQL |
 | 3 | `03_explore.py` | Urban share per country, city size split, histograms and scatter plots | Visualising data, bias |
-| 4 | `04_train_and_swap.py` | Guess the official class from the buildings alone (no population), inside each country and swapped between them. Three versions: a random forest on averages, a random forest on the densest part, and a two-question rule on one number. The rule does as well or better and draws the map. Also compares a too-simple tree, a too-detailed tree and a small neural network | Classification, generalisation, overfitting and underfitting, neural networks, limits of ML |
+| 4 | `04_train_and_swap.py` | Guess the official class from the buildings alone (no population), inside each country and swapped between them. Three versions: a random forest on averages, a random forest on the densest part, and a two-question rule on the size of the built-up area a place belongs to. The rule draws the maps. Also compares a too-simple tree, a too-detailed tree and a small neural network | Classification, generalisation, overfitting and underfitting, neural networks, limits of ML |
+| 5 | `05_get_census.py` | Census data per municipality: share of homes in single-family houses, share of households owning their home | Data acquisition |
+| 6 | `06_census_maps.py` | The overlay maps with census data as a third row, and a test of which measure explains the satellite's "more urban" calls | Visualising data, testing an explanation |
 | check | `check_results.py` | Ten tests that try to break the results: recounts, exact boundaries, neighbours held out together, other thresholds, how far the scores could move by luck | Designing tests |
 | 5 | `05_place_types.py` | Group municipalities without using the labels, reduce the features to two dimensions to plot them | Clustering, dimensionality reduction |
 | 6 | `06_maps.py` | The final maps | |
@@ -94,10 +99,12 @@ These are part of the project and will be discussed, not hidden:
 - **Building height is an estimate.** It is modelled from satellite data, not measured building by building. The dataset never goes below about 2.5 m, and most rural municipalities sit exactly on that floor, so height says little about differences between villages.
 - **We count people per municipality, not per building.** The data has no number of buildings and no number of flats.
 - **The years don't line up exactly.** Labels are from 2024, buildings from 2020, and population from 2024 or later. These things change slowly, but not at the same speed everywhere.
-- **"Densely built" is our own threshold, and it matters.** A 1 km square counts as dense at 10% building cover, chosen to roughly match Eurostat's population threshold. Between 5% and 10% the results hold. At 15% and above they collapse for Switzerland, whose towns are less tightly built than Hungary's.
-- **Hungary has only 18 cities.** A score for Hungary can move by about 6 points either way depending on which few cities are guessed right.
+- **Buildings are not people.** Building volume stands in for inhabitants at 450 m³ per person. That number is ours. With 300 to 750 the scores move by up to about 11 points, so results a few points apart should not be told apart.
+- **Rare classes get extra weight.** The rule is told to pay more attention to rare classes (by the square root of how rare they are). Without that it finds no Hungarian cities at all; with full "balanced" weighting it calls twice as many places a city as Eurostat does.
+- **Hungary has only 18 cities.** A balanced score for Hungary can move by about 8 points either way depending on which few cities are guessed right.
 - **The features were chosen after seeing results.** The switch from averages to the densest part was made because the first version transferred badly, and it was judged on the same two countries. A third country would be the clean test.
 - **The boundaries are simplified.** They are drawn for a 1:1 million map, the only version Eurostat publishes. With exact boundaries for Switzerland, 99% of the guesses stay the same.
+- **The census measures are not alike.** Swiss house share is counted (2025); Hungarian house share is estimated from heating (2022) and too high in old city centres. Hungarian ownership is counted (2022); Swiss ownership comes from the 2000 census, the newest per municipality.
 - **Urban and rural are a scale, not boxes.** Some of the model's "mistakes" will be places where the official label is debatable.
 
 ## How to run
@@ -128,6 +135,8 @@ python3 02_prepare.py
 python3 03_explore.py
 python3 04_train_and_swap.py
 python3 check_results.py
+python3 05_get_census.py
+python3 06_census_maps.py
 ```
 
 Step 1 downloads into `data/raw/` and skips files that are already there. The OpenStreetMap servers are often busy; the script tries three of them several times, and if it still fails, running it again later usually works. Step 2 writes `data/municipalities.gpkg`. Steps 3 and 4 draw their charts into `charts/`, and step 4 writes its guesses to `data/predictions.gpkg`. The `data/` folder is not uploaded to GitHub.

@@ -37,9 +37,10 @@ COUNTRIES = {"CH": "Switzerland", "HU": "Hungary"}
 MAP_PROJECTIONS = {"CH": "EPSG:2056", "HU": "EPSG:23700"}
 CLASSES = ["city", "town or suburb", "rural"]
 
-# One colour per class, the same in every chart. Countries are never told
-# apart by colour: they always get their own panel.
-COLOURS = {"city": "#2a78d6", "town or suburb": "#eb6834", "rural": "#1baf7a"}
+# One colour per class, the same in every chart and map: one teal blue that
+# gets darker the more urban the class is. Countries are never told apart by
+# colour: they always get their own panel.
+COLOURS = {"city": "#0b5563", "town or suburb": "#4fa9b5", "rural": "#cde8eb"}
 NEUTRAL = "#52514e"
 BACKGROUND = "#fcfcfb"
 INK = "#0b0b0b"
@@ -253,17 +254,29 @@ def chart_map_labels():
     figure, axes = plt.subplots(1, 2, figsize=(13, 4.6))
     figure.subplots_adjust(left=0.01, right=0.99, bottom=0.06, top=0.82, wspace=0.02)
 
+    # Same scale for both countries: each map shows a window of the same
+    # width and height in kilometres, centred on its country.
+    parts = {country: shapes[shapes["country"] == country].to_crs(MAP_PROJECTIONS[country])
+             for country in COUNTRIES}
+    width = max(p.total_bounds[2] - p.total_bounds[0] for p in parts.values()) * 1.04
+    tall = max(p.total_bounds[3] - p.total_bounds[1] for p in parts.values()) * 1.04
+
     for axis, (country, country_name) in zip(axes, COUNTRIES.items()):
-        rows = shapes[shapes["country"] == country].to_crs(MAP_PROJECTIONS[country])
+        rows = parts[country]
         rows.plot(ax=axis, color=rows["label_name"].map(COLOURS),
                   edgecolor=BACKGROUND, linewidth=0.15)
-        axis.set_title(country_name)
+        left, bottom, right, top = rows.total_bounds
+        axis.set_xlim((left + right - width) / 2, (left + right + width) / 2)
+        axis.set_ylim((bottom + top - tall) / 2, (bottom + top + tall) / 2)
+        slot = axis.get_subplotspec().get_position(figure)
+        figure.text(slot.x0 + 0.01, slot.y1 + 0.004, country_name, fontsize=11,
+                    fontweight="bold", ha="left", va="bottom")
         axis.set_axis_off()
 
     class_legend(figure)
     figure.suptitle("Official degree of urbanisation (Eurostat, 2024)", x=0.01, y=1.0,
                     ha="left", fontsize=13, fontweight="bold")
-    figure.text(0.01, 0.02, "The two maps are not drawn to the same scale.",
+    figure.text(0.01, 0.02, "Both countries are drawn at the same scale.",
                 color=NEUTRAL, fontsize=9)
     save(figure, "5_map_labels.png")
 

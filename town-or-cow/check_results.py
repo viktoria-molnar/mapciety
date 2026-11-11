@@ -68,12 +68,14 @@ def swap_scores(table, features=None, make_model=None):
 
 
 def recompute_patches(table):
-    """Recompute the built-up area size for every municipality in table."""
+    """Recompute the built-up area sizes for every municipality in table."""
     changed = table.copy()
     for country in COUNTRIES:
         sums = prepare.sums_for_country(changed, country, prepare.read_industrial(country))
-        changed.loc[sums.index, "patch_volume_m3"] = sums["patch_volume_m3"]
-    changed["log_patch_volume"] = numpy.log10(changed["patch_volume_m3"] + 1)
+        for column in ("town_area_m3", "city_area_m3"):
+            changed.loc[sums.index, column] = sums[column]
+    changed["log_town_area"] = numpy.log10(changed["town_area_m3"] + 1)
+    changed["log_city_area"] = numpy.log10(changed["city_area_m3"] + 1)
     return changed
 
 
@@ -202,19 +204,21 @@ def check_rule_is_stable(table):
     Learn it 20 times from a random half of each country and compare the
     size above which a place is called a city."""
     generator = numpy.random.default_rng(1)
-    sizes = pandas.DataFrame({swap.RULE[0]: numpy.linspace(0, 10, 2001)})
     notes, ok = [], True
     for country in COUNTRIES:
         rows = table[table["country"] == country]
         cuts = []
         for _ in range(20):
             half = rows.sample(frac=0.5, random_state=int(generator.integers(1_000_000)))
-            guesses = swap.make_rule().fit(half[swap.RULE], half["label"]).predict(sizes)
-            city_from = sizes[swap.RULE[0]][guesses == 1].min() if (guesses == 1).any() else numpy.nan
-            cuts.append(10 ** city_from / 1_000_000)
-        low, high = numpy.nanmin(cuts), numpy.nanmax(cuts)
+            _, city_from = swap.rule_cuts(swap.make_rule().fit(half[swap.RULE], half["label"]))
+            cuts.append(city_from / swap.M3_PER_PERSON)
+        if numpy.isnan(cuts).any():
+            ok = False
+            notes.append(f"{country}: in {int(numpy.isnan(cuts).sum())} of 20 halves the rule found no cities at all")
+            continue
+        low, high = min(cuts), max(cuts)
         ok = ok and high / low < 2
-        notes.append(f"{country}: 'city' starts between {low:.0f} and {high:.0f} million m3")
+        notes.append(f"{country}: 'city' starts between {low:,.0f} and {high:,.0f} people-equivalents")
     record("8. The rule's city threshold is stable (varies by less than a factor of 2 "
            "over 20 random halves)", ok, "; ".join(notes))
 
@@ -239,17 +243,17 @@ def check_uncertainty(table):
 
 
 def check_threshold(table):
-    """'Densely built' means 10% building cover. That number was chosen by
-    hand. Does the conclusion survive other choices?"""
+    """Building volume stands in for people at 450 m3 per person. That number
+    was chosen by hand. Do the scores survive other choices?"""
     rows_out = []
-    for threshold in (0.05, 0.10, 0.15, 0.20):
-        prepare.DENSE_BUILT_UP_SHARE = threshold
-        rows_out.append({"threshold": f"{threshold:.0%}", **swap_scores(recompute_patches(table))})
-    prepare.DENSE_BUILT_UP_SHARE = 0.10
-    result = pandas.DataFrame(rows_out).set_index("threshold")
+    for exchange in (300, 450, 600, 750):
+        prepare.M3_PER_PERSON = exchange
+        rows_out.append({"m3 per person": exchange, **swap_scores(recompute_patches(table))})
+    prepare.M3_PER_PERSON = 450
+    result = pandas.DataFrame(rows_out).set_index("m3 per person")
     spread = result.max() - result.min()
-    record("10. Swap scores survive other thresholds for 'densely built' "
-           "(no direction moves more than 8 points between 5% and 20%)",
+    record("10. Swap scores survive other exchange rates between building volume and people "
+           "(no direction moves more than 8 points between 300 and 750 m3 per person)",
            (spread < 8).all(),
            "; ".join(f"{index}: CH->HU {row['CH->HU']:.0f}%, HU->CH {row['HU->CH']:.0f}%"
                      for index, row in result.iterrows()))
